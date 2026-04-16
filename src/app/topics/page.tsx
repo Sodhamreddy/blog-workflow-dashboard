@@ -3,9 +3,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Search, Plus, Pencil, CheckCircle2, XCircle,
-  Circle, Download, Zap, Loader2, X,
+  Circle, Download, Zap, Loader2, X, ChevronRight,
+  Clock, PenLine, Palette, BadgeCheck, Globe,
 } from 'lucide-react'
-import type { Topic, TopicStatus, Priority, ClientName } from '@/types'
+import type { Topic, TopicStatus, Priority, ClientName, TeamType } from '@/types'
 import { CLIENTS, ALL_MEMBERS } from '@/types'
 import BlogEditorModal from '@/components/topics/BlogEditorModal'
 
@@ -39,13 +40,95 @@ const avatarColors = [
   'bg-blue-500', 'bg-violet-500', 'bg-emerald-500',
   'bg-rose-500',  'bg-amber-500',  'bg-cyan-500',
 ]
-const ALL_STATUSES: TopicStatus[] = ['Pending', 'Approved', 'Rejected', 'In Progress', 'Published']
 
 const clientColors: Record<ClientName, string> = {
   'Kleza':       'bg-blue-100 text-blue-700',
   'Interim HC':  'bg-violet-100 text-violet-700',
   'AHNS':        'bg-emerald-100 text-emerald-700',
   'StadiumRx':   'bg-rose-100 text-rose-700',
+}
+
+// ─── Pipeline flow config ────────────────────────────────────────────────────
+
+type StageKey = 'pending' | 'content' | 'ui_ux' | 'manager' | 'published'
+
+const PIPELINE_FLOW: {
+  key:       StageKey
+  label:     string
+  sub:       string
+  icon:      React.ElementType
+  active:    string   // active bg + text
+  inactive:  string   // inactive style
+  dot:       string
+  badge:     string
+}[] = [
+  {
+    key:      'pending',
+    label:    'Pending',
+    sub:      'Awaiting approval',
+    icon:     Clock,
+    active:   'bg-amber-500 text-white shadow-amber-200',
+    inactive: 'bg-white border border-slate-200 text-slate-600 hover:border-amber-300 hover:bg-amber-50',
+    dot:      'bg-amber-500',
+    badge:    'bg-amber-100 text-amber-700',
+  },
+  {
+    key:      'content',
+    label:    'Content Team',
+    sub:      'Writing + SEO review',
+    icon:     PenLine,
+    active:   'bg-violet-500 text-white shadow-violet-200',
+    inactive: 'bg-white border border-slate-200 text-slate-600 hover:border-violet-300 hover:bg-violet-50',
+    dot:      'bg-violet-500',
+    badge:    'bg-violet-100 text-violet-700',
+  },
+  {
+    key:      'ui_ux',
+    label:    'UI / UX',
+    sub:      'Design & layout',
+    icon:     Palette,
+    active:   'bg-sky-500 text-white shadow-sky-200',
+    inactive: 'bg-white border border-slate-200 text-slate-600 hover:border-sky-300 hover:bg-sky-50',
+    dot:      'bg-sky-500',
+    badge:    'bg-sky-100 text-sky-700',
+  },
+  {
+    key:      'manager',
+    label:    'Manager Approval',
+    sub:      'Final sign-off',
+    icon:     BadgeCheck,
+    active:   'bg-emerald-500 text-white shadow-emerald-200',
+    inactive: 'bg-white border border-slate-200 text-slate-600 hover:border-emerald-300 hover:bg-emerald-50',
+    dot:      'bg-emerald-500',
+    badge:    'bg-emerald-100 text-emerald-700',
+  },
+  {
+    key:      'published',
+    label:    'Blog Published',
+    sub:      'Live on WordPress',
+    icon:     Globe,
+    active:   'bg-slate-700 text-white shadow-slate-300',
+    inactive: 'bg-white border border-slate-200 text-slate-600 hover:border-slate-400 hover:bg-slate-50',
+    dot:      'bg-slate-500',
+    badge:    'bg-slate-100 text-slate-600',
+  },
+]
+
+function matchesStage(t: Topic, stage: StageKey | null): boolean {
+  if (!stage) return true
+  if (stage === 'pending')   return t.status === 'Pending' && t.current_team === 'content'
+  if (stage === 'content')   return t.current_team === 'content' && t.status !== 'Pending' && t.status !== 'Rejected'
+  if (stage === 'ui_ux')     return t.current_team === 'ui_ux'
+  if (stage === 'manager')   return t.current_team === 'manager'
+  if (stage === 'published') return t.current_team === 'completed' || t.status === 'Published'
+  return true
+}
+
+function countStage(topics: Topic[], stage: StageKey, clientFilter: ClientName | 'All'): number {
+  return topics
+    .filter(t => clientFilter === 'All' || (t.client ?? 'Kleza') === clientFilter)
+    .filter(t => matchesStage(t, stage))
+    .length
 }
 
 function fmtDate(iso: string) {
@@ -58,7 +141,7 @@ export default function TopicsPage() {
   const [topics,        setTopics]        = useState<Topic[]>([])
   const [loading,       setLoading]       = useState(true)
   const [search,        setSearch]        = useState('')
-  const [statusFilter,  setStatusFilter]  = useState<TopicStatus | 'All'>('All')
+  const [stageFilter,   setStageFilter]   = useState<StageKey | null>(null)
   const [clientFilter,  setClientFilter]  = useState<ClientName | 'All'>('All')
   const [editing,       setEditing]       = useState<Topic | null>(null)
   const [addOpen,       setAddOpen]       = useState(false)
@@ -68,23 +151,20 @@ export default function TopicsPage() {
   const [newPriority,   setNewPriority]   = useState<Priority>('Medium')
   const [adding,        setAdding]        = useState(false)
 
-  // ── Fetch from API ──────────────────────────────────────────────────────────
+  // ── Fetch ───────────────────────────────────────────────────────────────────
   const fetchTopics = useCallback(async () => {
     setLoading(true)
     try {
       const res  = await fetch('/api/topics')
       const data = await res.json()
       setTopics(Array.isArray(data) ? data : [])
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setLoading(false)
-    }
+    } catch (e) { console.error(e) }
+    finally    { setLoading(false) }
   }, [])
 
   useEffect(() => { fetchTopics() }, [fetchTopics])
 
-  // ── Optimistic status updates ───────────────────────────────────────────────
+  // ── Mutations ───────────────────────────────────────────────────────────────
   async function patchStatus(id: string, status: TopicStatus) {
     setTopics(ts => ts.map(t => t.id === id ? { ...t, status } : t))
     await fetch(`/api/topics/${id}`, {
@@ -124,24 +204,26 @@ export default function TopicsPage() {
   }
 
   // ── Derived ─────────────────────────────────────────────────────────────────
-  const filtered = topics.filter(t => {
+  const clientBase = topics.filter(t => clientFilter === 'All' || (t.client ?? 'Kleza') === clientFilter)
+
+  const filtered = clientBase.filter(t => {
     const q = search.toLowerCase()
     return (t.title.toLowerCase().includes(q) || (t.assignee ?? '').toLowerCase().includes(q))
-        && (statusFilter === 'All' || t.status === statusFilter)
-        && (clientFilter === 'All' || (t.client ?? 'Kleza') === clientFilter)
+        && matchesStage(t, stageFilter)
   })
 
-  const counts = ALL_STATUSES.reduce((acc, s) => { acc[s] = topics.filter(t => t.status === s).length; return acc }, {} as Record<TopicStatus, number>)
+  const totalPending = topics.filter(t => t.status === 'Pending').length
 
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-[1400px] mx-auto animate-fade-in">
+
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Topic Management</h2>
           <p className="text-sm text-slate-500 mt-0.5">
-            {loading ? 'Loading…' : `${topics.length} topics · ${counts['Pending'] ?? 0} pending review`}
+            {loading ? 'Loading…' : `${topics.length} topics · ${totalPending} pending review`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -154,25 +236,80 @@ export default function TopicsPage() {
         </div>
       </div>
 
-      {/* Client + Status filters */}
-      <div className="flex flex-wrap items-center gap-2 mb-5">
-        {/* Client filter */}
+      {/* ── Pipeline Flow Bar ─────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 mb-5">
+        <div className="flex items-center gap-1 overflow-x-auto pb-1">
+          {/* All button */}
+          <button
+            onClick={() => setStageFilter(null)}
+            className={`shrink-0 flex flex-col items-center gap-1 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all ${
+              stageFilter === null
+                ? 'bg-slate-900 text-white shadow-md shadow-slate-200'
+                : 'bg-white border border-slate-200 text-slate-500 hover:bg-slate-50'
+            }`}
+          >
+            <span className="text-base font-bold leading-none">{clientBase.length}</span>
+            <span className="text-[10px] font-medium">All Topics</span>
+          </button>
+
+          {PIPELINE_FLOW.map((stage, i) => {
+            const Icon  = stage.icon
+            const count = countStage(topics, stage.key, clientFilter)
+            const active = stageFilter === stage.key
+            return (
+              <div key={stage.key} className="flex items-center shrink-0">
+                {/* Arrow connector */}
+                <ChevronRight size={16} className="text-slate-300 mx-0.5 shrink-0" />
+                {/* Stage card */}
+                <button
+                  onClick={() => setStageFilter(active ? null : stage.key)}
+                  className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl transition-all shadow-sm ${
+                    active ? stage.active + ' shadow-md' : stage.inactive
+                  }`}
+                >
+                  <div className={`flex items-center justify-center w-7 h-7 rounded-lg shrink-0 ${
+                    active ? 'bg-white/20' : 'bg-slate-100'
+                  }`}>
+                    <Icon size={13} className={active ? 'text-white' : 'text-slate-500'} />
+                  </div>
+                  <div className="text-left">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-semibold leading-tight whitespace-nowrap">{stage.label}</span>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none ${
+                        active ? 'bg-white/25 text-white' : stage.badge
+                      }`}>{count}</span>
+                    </div>
+                    <span className={`text-[10px] leading-tight whitespace-nowrap ${active ? 'text-white/70' : 'text-slate-400'}`}>
+                      {stage.sub}
+                    </span>
+                  </div>
+                </button>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Active stage indicator */}
+        {stageFilter && (() => {
+          const s = PIPELINE_FLOW.find(f => f.key === stageFilter)!
+          return (
+            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${s.dot}`} />
+              <span className="text-xs text-slate-500">Showing <strong className="text-slate-700">{s.label}</strong> — {s.sub}</span>
+              <button onClick={() => setStageFilter(null)} className="ml-auto text-[10px] text-slate-400 hover:text-slate-600 flex items-center gap-1">
+                <X size={10} /> Clear filter
+              </button>
+            </div>
+          )
+        })()}
+      </div>
+
+      {/* Client filter */}
+      <div className="flex items-center gap-2 mb-4">
         <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl px-1 py-1">
           <button onClick={() => setClientFilter('All')} className={`px-3 py-1 text-xs font-medium rounded-lg transition-all ${clientFilter === 'All' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>All Clients</button>
           {CLIENTS.map(c => (
             <button key={c} onClick={() => setClientFilter(c)} className={`px-3 py-1 text-xs font-medium rounded-lg transition-all ${clientFilter === c ? clientColors[c] : 'text-slate-500 hover:bg-slate-100'}`}>{c}</button>
-          ))}
-        </div>
-
-        {/* Status pills */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <button onClick={() => setStatusFilter('All')} className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-all ${statusFilter === 'All' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'}`}>
-            All ({topics.filter(t => clientFilter === 'All' || (t.client ?? 'Kleza') === clientFilter).length})
-          </button>
-          {ALL_STATUSES.map(s => (
-            <button key={s} onClick={() => setStatusFilter(s)} className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-all ${statusFilter === s ? statusStyles[s] + ' shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${statusDot[s]}`} />{s} ({topics.filter(t => t.status === s && (clientFilter === 'All' || (t.client ?? 'Kleza') === clientFilter)).length})
-            </button>
           ))}
         </div>
       </div>
@@ -203,7 +340,7 @@ export default function TopicsPage() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/60">
-                  {['Topic Title', 'Client', 'Generated', 'Status', 'Assignee', 'Priority', 'Actions'].map(h => (
+                  {['Topic Title', 'Client', 'Stage', 'Generated', 'Status', 'Assignee', 'Priority', 'Actions'].map(h => (
                     <th key={h} className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">{h}</th>
                   ))}
                 </tr>
@@ -211,6 +348,15 @@ export default function TopicsPage() {
               <tbody>
                 {filtered.map((topic, i) => {
                   const clientKey = (topic.client ?? 'Kleza') as ClientName
+                  // Determine which pipeline stage this topic is at
+                  const stageInfo = (() => {
+                    if (topic.status === 'Pending' && topic.current_team === 'content')                               return PIPELINE_FLOW[0]
+                    if (topic.current_team === 'content' && topic.status !== 'Pending')                               return PIPELINE_FLOW[1]
+                    if (topic.current_team === 'ui_ux')                                                               return PIPELINE_FLOW[2]
+                    if (topic.current_team === 'manager')                                                             return PIPELINE_FLOW[3]
+                    if (topic.current_team === 'completed' || topic.status === 'Published')                           return PIPELINE_FLOW[4]
+                    return PIPELINE_FLOW[0]
+                  })()
                   return (
                     <tr key={topic.id} className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors group">
                       <td className="px-5 py-3.5 max-w-xs">
@@ -224,6 +370,12 @@ export default function TopicsPage() {
                       </td>
                       <td className="px-5 py-3.5 whitespace-nowrap">
                         <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${clientColors[clientKey] ?? 'bg-slate-100 text-slate-600'}`}>{clientKey}</span>
+                      </td>
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${stageInfo.dot}`} />
+                          <span className="text-[11px] text-slate-600 font-medium">{stageInfo.label}</span>
+                        </div>
                       </td>
                       <td className="px-5 py-3.5 whitespace-nowrap">
                         <p className="text-xs text-slate-600">{fmtDate(topic.generated_date)}</p>
@@ -274,7 +426,7 @@ export default function TopicsPage() {
             <div className="py-16 text-center">
               <Circle size={32} className="mx-auto text-slate-200 mb-3" />
               <p className="text-sm font-medium text-slate-400">
-                {topics.length === 0 ? 'No topics yet — n8n will push them here automatically' : 'No topics match your search'}
+                {topics.length === 0 ? 'No topics yet — n8n will push them here automatically' : 'No topics match your filter'}
               </p>
             </div>
           )}
@@ -283,11 +435,6 @@ export default function TopicsPage() {
         {/* Footer */}
         <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/40">
           <p className="text-xs text-slate-400">Showing {filtered.length} of {topics.length} topics</p>
-          <div className="flex items-center gap-1.5">
-            {[1, 2, 3].map(p => (
-              <button key={p} className={`w-7 h-7 text-xs font-medium rounded-lg transition-colors ${p === 1 ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>{p}</button>
-            ))}
-          </div>
         </div>
       </div>
 
