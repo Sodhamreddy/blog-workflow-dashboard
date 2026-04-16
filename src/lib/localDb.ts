@@ -1,10 +1,6 @@
-/**
- * Local JSON file storage — no external database required.
- * Data is persisted in data/db.json relative to the project root.
- */
 import fs from 'fs'
 import path from 'path'
-import type { Topic, Notification } from '@/types'
+import type { Topic, Notification, TopicComment, CommentReply } from '@/types'
 
 const DB_PATH = path.join(process.cwd(), 'data', 'db.json')
 
@@ -51,16 +47,30 @@ export function dbGetTopics(): Topic[] {
 }
 
 export function dbInsertTopic(
-  fields: Omit<Topic, 'id' | 'created_at' | 'updated_at' | 'views' | 'generated_date'>
+  fields: Partial<Omit<Topic, 'id' | 'created_at' | 'updated_at'>> & { title: string }
 ): Topic {
   const db  = load()
   const now = new Date().toISOString()
   const topic: Topic = {
-    id:             uuid(),
-    views:          0,
-    generated_date: now,
-    created_at:     now,
-    updated_at:     now,
+    id:               uuid(),
+    views:            0,
+    generated_date:   now,
+    created_at:       now,
+    updated_at:       now,
+    status:           'Pending',
+    current_team:     'content',
+    priority:         'Medium',
+    client:           'Kleza',
+    content_approved: false,
+    seo_approved:     false,
+    comments:         [],
+    assignee:         null,
+    category:         null,
+    keywords:         null,
+    seo_title:        null,
+    content:          null,
+    blog_content:     null,
+    deadline:         null,
     ...fields,
   }
   db.topics.push(topic)
@@ -82,6 +92,64 @@ export function dbDeleteTopic(id: string): boolean {
   const len = db.topics.length
   db.topics = db.topics.filter(t => t.id !== id)
   if (db.topics.length < len) { save(db); return true }
+  return false
+}
+
+// ─── Comments ────────────────────────────────────────────────────────────────
+
+export function dbAddComment(
+  topicId: string,
+  fields: { author: string; text: string }
+): TopicComment | null {
+  const db = load()
+  const i  = db.topics.findIndex(t => t.id === topicId)
+  if (i === -1) return null
+
+  if (!Array.isArray(db.topics[i].comments)) db.topics[i].comments = []
+
+  const comment: TopicComment = {
+    id:         uuid(),
+    created_at: new Date().toISOString(),
+    replies:    [],
+    ...fields,
+  }
+  db.topics[i].comments.push(comment)
+  db.topics[i].updated_at = new Date().toISOString()
+  save(db)
+  return comment
+}
+
+export function dbAddReply(
+  topicId: string,
+  commentId: string,
+  fields: { author: string; text: string }
+): CommentReply | null {
+  const db = load()
+  const ti = db.topics.findIndex(t => t.id === topicId)
+  if (ti === -1) return null
+
+  const comments = db.topics[ti].comments ?? []
+  const ci = comments.findIndex(c => c.id === commentId)
+  if (ci === -1) return null
+
+  const reply: CommentReply = {
+    id:         uuid(),
+    created_at: new Date().toISOString(),
+    ...fields,
+  }
+  comments[ci].replies.push(reply)
+  db.topics[ti].updated_at = new Date().toISOString()
+  save(db)
+  return reply
+}
+
+export function dbDeleteComment(topicId: string, commentId: string): boolean {
+  const db = load()
+  const i  = db.topics.findIndex(t => t.id === topicId)
+  if (i === -1) return false
+  const before = (db.topics[i].comments ?? []).length
+  db.topics[i].comments = (db.topics[i].comments ?? []).filter(c => c.id !== commentId)
+  if (db.topics[i].comments.length < before) { save(db); return true }
   return false
 }
 
